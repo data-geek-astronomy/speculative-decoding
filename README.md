@@ -2,7 +2,7 @@
 title: Speculative Decoding From Scratch
 emoji: ⚡
 colorFrom: yellow
-colorTo: orange
+colorTo: red
 sdk: gradio
 sdk_version: 5.9.1
 app_file: app.py
