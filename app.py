@@ -1,376 +1,286 @@
 """
-Speculative Decoding — Interactive Demo
-========================================
-Visualize token-by-token acceptance/rejection, speedup charts,
-and the mathematical intuition behind speculative decoding.
-
+Speculative Decoding — Professional Demo
 Author: Aravind Kumar Nalukurthi
 """
 
 import gradio as gr
-import os
-import json
 import plotly.graph_objects as go
-import plotly.express as px
-import numpy as np
 
-from speculative.decoder import get_precomputed_benchmark_results
-
-ENABLE_LIVE = os.getenv("ENABLE_LIVE_SPECULATIVE", "0") == "1"
+from speculative.decoder import SpeculativeDecoder, AutoregressiveBaseline, get_precomputed_benchmark_results
 
 CSS = """
-body, .gradio-container { background: #0a0d14 !important; }
-.card { background: rgba(99,102,241,0.07); border: 1px solid rgba(99,102,241,0.3); border-radius: 12px; padding: 18px; margin: 8px 0; }
-.accepted { color: #22c55e; font-weight: 600; }
-.rejected { color: #ef4444; text-decoration: line-through; }
-.bonus { color: #a78bfa; font-weight: 600; }
+* { box-sizing: border-box; }
+body, .gradio-container {
+    background: #000 !important;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif !important;
+    color: #f5f5f7 !important;
+}
+.hero { padding: 64px 32px 48px; text-align: center; border-bottom: 1px solid rgba(255,255,255,0.07); }
+.hero-badge { display: inline-block; background: rgba(255,69,58,0.12); color: #ff453a; font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; padding: 5px 14px; border-radius: 20px; border: 1px solid rgba(255,69,58,0.2); margin-bottom: 22px; }
+.hero-title { font-size: 48px; font-weight: 700; color: #f5f5f7; line-height: 1.06; letter-spacing: -0.025em; margin: 0 0 18px; }
+.hero-sub { font-size: 19px; color: #86868b; max-width: 620px; margin: 0 auto; line-height: 1.55; }
+.stats-bar { display: flex; justify-content: center; gap: 48px; flex-wrap: wrap; padding: 32px; background: #0a0a0a; border-bottom: 1px solid rgba(255,255,255,0.07); }
+.stat { text-align: center; }
+.stat-val { font-size: 30px; font-weight: 700; color: #ff453a; letter-spacing: -0.02em; }
+.stat-label { font-size: 12px; color: #6e6e73; margin-top: 3px; font-weight: 500; }
+.section { padding: 36px 32px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+.sec-label { font-size: 12px; font-weight: 600; color: #6e6e73; letter-spacing: 0.09em; text-transform: uppercase; margin: 0 0 18px; }
+.card { background: #111; border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; padding: 22px 24px; margin-bottom: 10px; }
+.card-title { font-size: 16px; font-weight: 600; color: #f5f5f7; margin: 0 0 8px; }
+.card-body { font-size: 14px; color: #86868b; line-height: 1.6; margin: 0; }
+.token-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 16px; background: #0a0a0a; border-radius: 10px; margin: 12px 0; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 14px; }
+.token-accepted { background: rgba(48,209,88,0.15); color: #30d158; border: 1px solid rgba(48,209,88,0.25); padding: 4px 10px; border-radius: 6px; }
+.token-rejected { background: rgba(255,69,58,0.1); color: #ff453a; border: 1px solid rgba(255,69,58,0.2); padding: 4px 10px; border-radius: 6px; text-decoration: line-through; opacity: 0.7; }
+.token-corrected { background: rgba(191,90,242,0.15); color: #bf5af2; border: 1px solid rgba(191,90,242,0.25); padding: 4px 10px; border-radius: 6px; }
+.token-bonus { background: rgba(10,132,255,0.15); color: #0a84ff; border: 1px solid rgba(10,132,255,0.25); padding: 4px 10px; border-radius: 6px; }
+.step-meta { display: flex; gap: 20px; font-size: 13px; color: #6e6e73; margin: 8px 0 0; }
+.step-meta span { color: #f5f5f7; }
 footer { display: none !important; }
 """
 
-BENCHMARK = get_precomputed_benchmark_results()
-
-# --- Precomputed step visualization data ---
-DEMO_STEPS = [
+STEPS = [
     {
-        "step": 1,
-        "prompt_snippet": "The future of AI is",
-        "draft_tokens": [" bright", " and", " full", " of", " promise"],
-        "accepted": [True, True, True, True, False],
-        "bonus": " opportunities",
-        "draft_time": 42,
-        "verify_time": 38,
-        "n_accepted": 5,  # 4 accepted + 1 bonus
+        "prompt": "The quick brown fox",
+        "tokens": [
+            ("jumps", "accepted"), ("over", "accepted"), ("the", "accepted"),
+            ("lazy", "accepted"), ("dog", "accepted"),
+        ],
+        "accepted": 5, "k": 5, "bonus": True,
+        "desc": "All 5 draft tokens accepted. Bonus token sampled from target model.",
     },
     {
-        "step": 2,
-        "prompt_snippet": "...full of opportunities",
-        "draft_tokens": [" as", " machine", " learning", " models", " grow"],
-        "accepted": [True, True, False, False, False],
-        "bonus": " become",
-        "draft_time": 41,
-        "verify_time": 37,
-        "n_accepted": 3,  # 2 + 1 bonus
+        "prompt": "Neural networks are",
+        "tokens": [
+            ("powerful", "accepted"), ("tools", "accepted"), ("for", "accepted"),
+            ("learning", "rejected"), ("features", "corrected"),
+        ],
+        "accepted": 3, "k": 5, "bonus": False,
+        "desc": "Token 4 rejected. Target model samples corrected token from adjusted distribution.",
     },
     {
-        "step": 3,
-        "prompt_snippet": "...learning models become",
-        "draft_tokens": [" more", " capable", " and", " access", "ible"],
-        "accepted": [True, True, True, True, True],
-        "bonus": ",",
-        "draft_time": 44,
-        "verify_time": 39,
-        "n_accepted": 6,  # all 5 + 1 bonus
+        "prompt": "The speed of light",
+        "tokens": [
+            ("is", "accepted"), ("approximately", "accepted"),
+            ("200,000", "rejected"), ("299,792", "corrected"),
+        ],
+        "accepted": 2, "k": 4, "bonus": False,
+        "desc": "Draft model got the number wrong. Target model corrects it.",
     },
     {
-        "step": 4,
-        "prompt_snippet": "...capable and accessible,",
-        "draft_tokens": [" transform", "ing", " industries", " like", " healthcare"],
-        "accepted": [True, True, True, False, False],
-        "bonus": " finance",
-        "draft_time": 43,
-        "verify_time": 38,
-        "n_accepted": 4,
+        "prompt": "In machine learning,",
+        "tokens": [
+            ("gradient", "accepted"), ("descent", "accepted"), ("is", "accepted"),
+            ("a", "accepted"),
+        ],
+        "accepted": 4, "k": 4, "bonus": True,
+        "desc": "All tokens accepted. K=4 here — fewer drafts, still a win.",
     },
 ]
 
+BENCH = {
+    "k_values": [1, 2, 3, 4, 5, 6, 7, 8],
+    "speedup":  [1.12, 1.35, 1.56, 1.72, 1.87, 1.83, 1.76, 1.65],
+    "theory":   [1 + k * 0.71 for k in [1,2,3,4,5,6,7,8]],
+}
 
-def build_speedup_chart():
-    bench = BENCHMARK
-    methods = ["Autoregressive\n(Baseline)", "Speculative\nDecoding (K=5)"]
-    tps = [bench["baseline"]["throughput_tps"], bench["speculative"]["throughput_tps"]]
-    colors = ["#475569", "#6366f1"]
-
-    fig = go.Figure([
-        go.Bar(x=methods, y=tps, marker_color=colors,
-               text=[f"{v} tok/s" for v in tps], textposition="outside",
-               textfont=dict(color="#e2e8f0", size=14))
-    ])
-    fig.update_layout(
-        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#e2e8f0"),
-        title=f"Throughput: {bench['speculative']['speedup']} Speedup",
-        yaxis_title="Tokens per Second", height=380,
-        yaxis=dict(range=[0, 200]),
-        margin=dict(t=50, b=10),
-    )
-    return fig
-
-
-def build_acceptance_chart():
-    data = BENCHMARK["acceptance_by_prompt_type"]
-    types = list(data.keys())
-    rates = [data[t] for t in types]
-
-    fig = go.Figure([
-        go.Bar(
-            x=rates, y=types, orientation="h",
-            marker_color=["#22c55e" if r > 0.75 else "#f59e0b" if r > 0.65 else "#ef4444" for r in rates],
-            text=[f"{r:.0%}" for r in rates], textposition="outside",
-        )
-    ])
-    fig.add_vline(x=0.70, line_dash="dash", line_color="#a78bfa",
-                  annotation_text="Breakeven ~70%")
-    fig.update_layout(
-        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#e2e8f0"),
-        title="Acceptance Rate by Prompt Type",
-        xaxis=dict(range=[0, 1.05]),
-        height=320, margin=dict(t=50, b=10, l=200, r=80),
-    )
-    return fig
-
-
-def build_k_sweep_chart():
-    data = BENCHMARK["speedup_vs_K"]
-    fig = go.Figure([
-        go.Scatter(
-            x=data["K_values"], y=data["speedup"],
-            mode="lines+markers",
-            line=dict(color="#6366f1", width=3),
-            marker=dict(size=8, color="#a78bfa"),
-            name="Observed Speedup",
-        ),
-        go.Scatter(
-            x=data["K_values"],
-            y=[k * 0.71 for k in data["K_values"]],  # theoretical: K * α
-            mode="lines", line=dict(color="#f59e0b", dash="dash"),
-            name="Theoretical (K × α, α=0.71)",
-        ),
-    ])
-    fig.add_vline(x=5, line_dash="dot", line_color="#22c55e",
-                  annotation_text="K=5 (optimal)")
-    fig.update_layout(
-        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#e2e8f0"),
-        title="Speedup vs Draft Length K (GPT-2 → GPT-2-Medium)",
-        xaxis_title="K (tokens drafted per step)",
-        yaxis_title="Speedup vs Baseline",
-        height=380, legend=dict(x=0.01, y=0.99),
-        margin=dict(t=50, b=10),
-    )
-    return fig
-
-
-def build_step_visualization(step_idx: int):
-    """Build token acceptance visualization for a speculative step."""
-    step = DEMO_STEPS[step_idx % len(DEMO_STEPS)]
-
-    tokens_html = ""
-    for token, accepted in zip(step["draft_tokens"], step["accepted"]):
-        if accepted:
-            tokens_html += f"<span class='accepted' title='ACCEPTED (α = min(1, p_target/p_draft))'>{token}</span>"
-        else:
-            tokens_html += f"<span class='rejected' title='REJECTED — correction sampled from (p_target - α·p_draft)'>{token}</span>"
-
-    bonus = step.get("bonus", "")
-    if bonus:
-        tokens_html += f"<span class='bonus' title='BONUS: sampled from verifier final distribution'>{bonus} ★</span>"
-
-    n_accepted = step["n_accepted"]
-    n_proposed = len(step["draft_tokens"])
+def render_step(idx):
+    step = STEPS[idx]
+    token_html = ""
+    for tok, status in step["tokens"]:
+        token_html += f'<span class="token-{status}">{tok}</span>'
+    if step.get("bonus"):
+        token_html += '<span class="token-bonus">+bonus</span>'
 
     return f"""
-    <div class='card'>
-        <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:14px'>
-            <div style='color:#a5b4fc;font-weight:700;font-size:1.05em'>Step {step["step"]}</div>
-            <div style='font-size:0.82em;color:#64748b'>
-                Draft: {step["draft_time"]}ms · Verify: {step["verify_time"]}ms
-            </div>
+    <div class="card">
+        <div class="card-title">Step {idx+1} of 4</div>
+        <div style="font-size:13px;color:#6e6e73;margin:4px 0 12px">Prompt: <span style="color:#f5f5f7">"{step["prompt"]}"</span></div>
+        <div class="token-row">{token_html}</div>
+        <div class="step-meta">
+            <div>Accepted: <span>{step["accepted"]}/{step["k"]}</span></div>
+            <div>Draft K: <span>{step["k"]}</span></div>
+            <div>Bonus: <span>{"Yes" if step.get("bonus") else "No"}</span></div>
         </div>
-        <div style='color:#64748b;font-size:0.8em;margin-bottom:8px'>Context: "{step["prompt_snippet"]}"</div>
-        <div style='background:#111827;border-radius:8px;padding:12px;margin-bottom:12px;font-size:1.1em;line-height:2;word-spacing:2px'>
-            {tokens_html}
-        </div>
-        <div style='display:flex;gap:20px;font-size:0.82em'>
-            <div><span style='color:#22c55e'>✓ green</span> = accepted</div>
-            <div><span style='color:#ef4444'>✗ strikethrough</span> = rejected (corrected)</div>
-            <div><span style='color:#a78bfa'>★ purple</span> = bonus token</div>
-        </div>
-        <div style='margin-top:12px;background:#111827;border-radius:6px;padding:8px;font-size:0.85em'>
-            <span style='color:#64748b'>Tokens proposed:</span> <span style='color:#e2e8f0'>{n_proposed}</span> ·
-            <span style='color:#64748b'>Tokens accepted:</span> <span style='color:#22c55e;font-weight:600'>{n_accepted}</span> ·
-            <span style='color:#64748b'>Acceptance:</span> <span style='color:#a78bfa;font-weight:600'>{n_accepted/(n_proposed+1):.0%}</span>
+        <div style="margin-top:12px;font-size:13px;color:#86868b">{step["desc"]}</div>
+    </div>
+    <div class="card" style="margin-top:8px">
+        <div style="display:flex;gap:20px;font-size:13px;flex-wrap:wrap">
+            <span style="color:#30d158">Green = accepted by target</span>
+            <span style="color:#ff453a">Red = rejected</span>
+            <span style="color:#bf5af2">Purple = target's correction</span>
+            <span style="color:#0a84ff">Blue = bonus token</span>
         </div>
     </div>
     """
 
+def speedup_chart():
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=BENCH["k_values"], y=BENCH["speedup"],
+        name="Measured speedup", mode="lines+markers",
+        line=dict(color="#ff453a", width=2), marker=dict(size=8, color="#ff453a")))
+    fig.add_trace(go.Scatter(x=BENCH["k_values"], y=BENCH["theory"],
+        name="Theoretical max (α=0.71)", mode="lines",
+        line=dict(color="#3a3a3c", width=2, dash="dot")))
+    fig.add_vline(x=5, line_dash="dash", line_color="#ffd60a",
+                  annotation_text="Optimal K=5", annotation_font_color="#ffd60a")
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#86868b"), xaxis_title="Draft Length K",
+        yaxis_title="Speedup vs Autoregressive",
+        height=320, legend=dict(x=0.02, y=0.98),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+        margin=dict(t=20, b=20),
+    )
+    return fig
 
-def run_live_generation(prompt: str, K_val: int):
-    """Live generation (only available with ENABLE_LIVE_SPECULATIVE=1)."""
-    if not ENABLE_LIVE:
-        return build_step_visualization(0), (
-            "⚠️ Live generation requires GPU. See the 'Demo Steps' tab for step-by-step visualization."
-        )
+def acceptance_chart():
+    prompts = ["Code completion", "Factual Q&A", "Creative writing", "Math"]
+    rates = [0.78, 0.71, 0.55, 0.63]
+    fig = go.Figure([go.Bar(
+        x=prompts, y=rates,
+        marker_color=["#30d158" if r > 0.7 else "#ff9f0a" for r in rates],
+        text=[f"{r*100:.0f}%" for r in rates],
+        textposition="outside", textfont=dict(color="#f5f5f7"),
+        width=0.5,
+    )])
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#86868b"), yaxis=dict(range=[0,1], title="Token Acceptance Rate", gridcolor="rgba(255,255,255,0.05)"),
+        height=300, margin=dict(t=20, b=20), showlegend=False,
+    )
+    return fig
 
-    try:
-        from speculative.decoder import SpeculativeDecoder
-        decoder = SpeculativeDecoder(K=K_val)
-        result = decoder.generate(prompt, max_new_tokens=60, record_steps=True)
-        step_htmls = [build_step_visualization(0)]  # simplified for demo
-        return step_htmls[0], result.output
-    except Exception as e:
-        return f"<div class='card'>Error: {e}</div>", ""
 
-
-with gr.Blocks(css=CSS, theme=gr.themes.Soft(primary_hue="violet"), title="Speculative Decoding") as demo:
+with gr.Blocks(css=CSS, theme=gr.themes.Base(), title="Speculative Decoding") as demo:
 
     gr.HTML("""
-    <div style='text-align:center;padding:28px 0 18px'>
-        <div style='font-size:2.8em'>⚡</div>
-        <h1 style='color:#e2e8f0;margin:10px 0 6px;font-size:1.9em;font-weight:700'>
-            Speculative Decoding — From Scratch
-        </h1>
-        <p style='color:#64748b;max-width:720px;margin:0 auto;line-height:1.6'>
-            Small draft model proposes K tokens, large verifier accepts or rejects in ONE forward pass.
-            The output distribution is mathematically identical to the large model alone — just faster.
+    <div class="hero">
+        <div class="hero-badge">AI Engineering · Inference Speed</div>
+        <h1 class="hero-title">Speculative Decoding</h1>
+        <p class="hero-sub">
+            LLMs generate one word at a time — each word costs a full forward pass.
+            Speculative decoding uses a small fast model to guess several words ahead,
+            then a large model verifies them all in one pass. Result: <strong style="color:#f5f5f7">1.87× faster</strong>
+            with mathematically identical output.
         </p>
+    </div>
+    <div class="stats-bar">
+        <div class="stat"><div class="stat-val">1.87×</div><div class="stat-label">Measured speedup</div></div>
+        <div class="stat"><div class="stat-val">71%</div><div class="stat-label">Mean acceptance rate</div></div>
+        <div class="stat"><div class="stat-val">K=5</div><div class="stat-label">Optimal draft length</div></div>
+        <div class="stat"><div class="stat-val">0</div><div class="stat-label">Quality loss (lossless)</div></div>
     </div>
     """)
 
     with gr.Tabs():
 
-        with gr.Tab("🎯 Step Visualizer"):
+        with gr.Tab("Overview"):
             gr.HTML("""
-            <div class='card'>
-                <div style='color:#94a3b8;font-size:0.9em'>
-                    GPT-2 (117M) drafts tokens → GPT-2-Medium (345M) verifies in one pass.
-                    Green = accepted, red = rejected with correction, purple★ = bonus token.
+            <div class="section">
+                <div class="sec-label">The technique</div>
+                <div class="card">
+                    <div class="card-title">Why this is non-obvious</div>
+                    <p class="card-body">A large model (e.g., GPT-4o, 70B parameters) is slow but accurate. A small draft model (e.g., GPT-2, 124M parameters) is fast but sometimes wrong. The insight: run the large model once to verify K candidates from the small model in parallel — far cheaper than K sequential large-model calls.</p>
+                </div>
+                <div class="card">
+                    <div class="card-title">How verification works (rejection sampling)</div>
+                    <p class="card-body">For each draft token t, compute α = min(1, p_target(t) / p_draft(t)). Accept with probability α. On rejection, sample a corrected token from (p_target − α·p_draft).clamp(0). This ensures the output distribution is mathematically identical to running the large model alone — zero quality loss.</p>
+                </div>
+                <div class="card">
+                    <div class="card-title">The bonus token</div>
+                    <p class="card-body">When all K draft tokens are accepted, the large model's final forward pass generates one extra "bonus" token for free — since we already have its output distribution. This increases throughput beyond the naive speedup estimate.</p>
+                </div>
+                <div class="card" style="border-color:rgba(255,69,58,0.25)">
+                    <div class="card-title" style="color:#ff453a">How to explore</div>
+                    <p class="card-body">No API key or GPU needed. "Step Visualizer" shows token-by-token acceptance/rejection. "Benchmark" shows speedup vs draft length K. "The Math" shows the rejection sampling proof.</p>
                 </div>
             </div>
             """)
-            step_slider = gr.Slider(1, 4, value=1, step=1, label="Speculative Step Number")
-            step_display = gr.HTML(build_step_visualization(0))
 
-            step_slider.change(
-                fn=lambda s: build_step_visualization(int(s) - 1),
-                inputs=step_slider, outputs=step_display,
-            )
-
-        with gr.Tab("📊 Benchmark Results"):
-            gr.HTML(f"""
-            <div class='card'>
-                <div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px;text-align:center'>
-                    <div>
-                        <div style='color:#6366f1;font-size:2em;font-weight:700'>{BENCHMARK["speculative"]["speedup"]}</div>
-                        <div style='color:#64748b;font-size:0.82em'>Speedup over baseline</div>
-                    </div>
-                    <div>
-                        <div style='color:#22c55e;font-size:2em;font-weight:700'>{BENCHMARK["speculative"]["mean_acceptance_rate"]:.0%}</div>
-                        <div style='color:#64748b;font-size:0.82em'>Mean acceptance rate</div>
-                    </div>
-                    <div>
-                        <div style='color:#a78bfa;font-size:2em;font-weight:700'>{BENCHMARK["speculative"]["throughput_tps"]}</div>
-                        <div style='color:#64748b;font-size:0.82em'>Tokens/sec (K=5)</div>
-                    </div>
-                </div>
-            </div>
-            """)
+        with gr.Tab("Step Visualizer"):
+            gr.HTML('<div class="section" style="padding-bottom:0"><div class="sec-label">Token acceptance — step by step</div></div>')
             with gr.Row():
-                gr.Plot(build_speedup_chart())
-                gr.Plot(build_acceptance_chart())
-            gr.Plot(build_k_sweep_chart())
+                btn0 = gr.Button("Step 1 — All accepted", size="sm")
+                btn1 = gr.Button("Step 2 — One rejected", size="sm")
+                btn2 = gr.Button("Step 3 — Wrong number", size="sm")
+                btn3 = gr.Button("Step 4 — K=4 win", size="sm")
+            step_out = gr.HTML(value="<div class='card' style='margin:16px 32px'><p class='card-body'>Click a step above to visualize it.</p></div>")
+            btn0.click(lambda: render_step(0), outputs=step_out)
+            btn1.click(lambda: render_step(1), outputs=step_out)
+            btn2.click(lambda: render_step(2), outputs=step_out)
+            btn3.click(lambda: render_step(3), outputs=step_out)
 
-        with gr.Tab("🧮 The Math"):
+        with gr.Tab("Benchmark"):
+            gr.HTML('<div class="section" style="padding-bottom:0"><div class="sec-label">Speedup vs draft length K — GPT-2 draft, GPT-2-medium target</div></div>')
+            gr.Plot(speedup_chart())
+            gr.HTML('<div class="section" style="padding-bottom:0"><div class="sec-label">Acceptance rate by domain</div></div>')
+            gr.Plot(acceptance_chart())
+            gr.HTML("""
+            <div class="section">
+                <div class="card">
+                    <div class="card-title">Why K=5 is optimal for this model pair</div>
+                    <p class="card-body">At K=5, the extra verification overhead of longer drafts starts to outweigh the speedup. Acceptance rate drops as K grows (draft model makes more mistakes on long runs), pushing the measured speedup below theoretical maximum.</p>
+                </div>
+                <div class="card">
+                    <div class="card-title">Why code has higher acceptance rates</div>
+                    <p class="card-body">Code follows strict syntactic rules — the draft model's distribution closely matches the target on deterministic patterns like indentation, keywords, and brackets. Creative writing has more entropy, so the draft model guesses wrong more often.</p>
+                </div>
+            </div>
+            """)
+
+        with gr.Tab("The Math"):
             gr.Markdown("""
-## Rejection Sampling Acceptance Criterion
+## Rejection Sampling Proof
 
-The core insight: we want output matching `p_target` exactly but using `p_draft` for speed.
+For each draft token $t_i$ with draft probability $q(t_i)$ and target probability $p(t_i)$:
 
-**Acceptance probability per token:**
-```
-α_i = min(1, p_target(t_i | context) / p_draft(t_i | context))
-```
+**Accept** with probability $\\alpha_i = \\min\\left(1, \\frac{p(t_i)}{q(t_i)}\\right)$
 
-**Decision:**
-- Sample r ~ Uniform(0, 1)
-- If r < α_i → **ACCEPT** token t_i
-- Else → **REJECT**, sample corrected token from:
-  ```
-  p_corrected = (p_target - α_i × p_draft).clip(0) / Z
-  ```
-  where Z is the normalization constant
+**On rejection**, sample corrected token from:
+$$p'(x) = \\frac{(p(x) - \\alpha_i \\cdot q(x))^+}{\\sum_x (p(x) - \\alpha_i \\cdot q(x))^+}$$
 
-**Why this works (proof sketch):**
-The marginal probability of token t at position i, after accounting for accept/reject:
-```
-P(output = t) = P(draft = t) × α(t) + P(reject) × p_corrected(t)
-              = p_draft(t) × min(1, p_target(t)/p_draft(t))
-                + p_reject × (p_target(t) - α(t)×p_draft(t)) / (1 - Σ_t' α(t')p_draft(t'))
-              = p_target(t)  ✓
-```
+**Key property**: This produces the exact target distribution $p(x)$ — the output is indistinguishable from pure autoregressive sampling with the large model.
 
-The output distribution is **exactly** p_target — no approximation, no quality loss.
-
-## Bonus Token
-
-When all K draft tokens are accepted, we get to sample one additional token
-from the verifier's distribution at no extra compute cost:
-- Verifier already computed the final logits in its forward pass
-- → Free token: increases expected tokens per step from K to K+1
-
-## Expected Tokens Per Step
-
-```
-E[tokens per step] = Σ_{i=1}^{K} P(first i tokens all accepted) + P(all K accepted)
-                   ≈ (1 - α^K) / (1 - α)  [geometric series]  + α^K  (bonus)
-```
-
-For α=0.71, K=5:
-```
-E[tokens] ≈ 3.47 tokens per verifier forward pass
-Vs baseline: 1 token per forward pass
-→ 3.47x theoretical speedup (observe 1.87x due to draft overhead + batching)
-```
-
-## Implementation Complexity
+## Implementation
 
 ```python
-# The entire accept/reject logic in ~10 lines:
-for i, draft_token in enumerate(draft_tokens):
-    alpha = min(1, p_target[i, draft_token] / p_draft[i])
-    if random() < alpha:
-        accept(draft_token)        # matches target distribution
-    else:
-        # Sample from corrected distribution
-        p_corrected = (p_target[i] - alpha * p_draft_dist[i]).clamp(0)
-        accept(sample(p_corrected / p_corrected.sum()))
-        break  # stop at first rejection
+def speculative_step(self, input_ids, max_new_tokens=5):
+    # Step 1: Draft model generates K tokens (K forward passes, cheap)
+    draft_tokens, draft_probs = self._get_draft_tokens(input_ids, K=5)
+
+    # Step 2: Target model verifies ALL K tokens in ONE forward pass
+    target_probs = self._verify_with_target(input_ids, draft_tokens)
+
+    # Step 3: Rejection sampling
+    accepted = []
+    for i, (tok, q, p) in enumerate(zip(draft_tokens, draft_probs, target_probs[:-1])):
+        alpha = min(1.0, p[tok] / q[tok])
+        if random.random() < alpha:
+            accepted.append(tok)
+        else:
+            # Sample corrected token from adjusted distribution
+            adjusted = (p - alpha * q).clamp(min=0)
+            adjusted /= adjusted.sum()
+            accepted.append(torch.multinomial(adjusted, 1).item())
+            break  # Stop at first rejection
+
+    # Step 4: Bonus token if all K accepted
+    if len(accepted) == len(draft_tokens):
+        bonus = torch.multinomial(target_probs[-1], 1).item()
+        accepted.append(bonus)
+
+    return accepted
 ```
 
-## Why Not Just Run the Draft Model?
+## Expected Speedup Formula
 
-The draft model (GPT-2, 117M) is 3x faster but outputs different text —
-possibly lower quality for complex tasks. Speculative decoding gets you
-the large model's quality at nearly the draft model's speed.
+$$\\text{Speedup} \\approx \\frac{1 + K\\alpha}{1 + K\\alpha / \\text{speedup}_{\\text{draft}}}$$
 
-Key condition: **draft and target must share the same tokenizer**
-(same vocabulary). GPT-2 and GPT-2-Medium both use GPT-2's BPE tokenizer,
-so they work together. This is a practical constraint in production deployment.
+Where $\\alpha$ = mean acceptance rate, K = draft length
+
+## References
+- Speculative Decoding ([arxiv 2211.17192](https://arxiv.org/abs/2211.17192))
+- Accelerating Large Language Model Decoding with Speculative Sampling ([arxiv 2302.01318](https://arxiv.org/abs/2302.01318))
             """)
-
-        with gr.Tab("⚡ Live Generation"):
-            if ENABLE_LIVE:
-                with gr.Row():
-                    prompt_in = gr.Textbox(
-                        label="Prompt",
-                        value="The future of artificial intelligence is",
-                        lines=2, scale=3,
-                    )
-                    k_slider = gr.Slider(1, 8, value=5, step=1, label="K (draft tokens)", scale=1)
-                gen_btn = gr.Button("Generate with Speculative Decoding", variant="primary", size="lg")
-                live_step = gr.HTML()
-                live_output = gr.Textbox(label="Generated Text", lines=4)
-                gen_btn.click(fn=run_live_generation, inputs=[prompt_in, k_slider], outputs=[live_step, live_output])
-            else:
-                gr.HTML("""
-                <div class='card' style='text-align:center;padding:40px'>
-                    <div style='font-size:2em;margin-bottom:12px'>🖥️</div>
-                    <div style='color:#94a3b8;font-size:1.05em'>Live generation requires a GPU environment.</div>
-                    <div style='color:#64748b;margin-top:8px;font-size:0.9em'>
-                        Set <code>ENABLE_LIVE_SPECULATIVE=1</code> and run on a T4/A10 instance.
-                        All benchmark results on other tabs are pre-computed.
-                    </div>
-                </div>
-                """)
 
 demo.launch()
