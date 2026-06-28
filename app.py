@@ -6,7 +6,11 @@ Author: Aravind Kumar Nalukurthi
 import gradio as gr
 import plotly.graph_objects as go
 
-from speculative.decoder import SpeculativeDecoder, AutoregressiveBaseline, get_precomputed_benchmark_results
+try:
+    from speculative.decoder import SpeculativeDecoder, AutoregressiveBaseline
+except Exception:
+    SpeculativeDecoder = None
+    AutoregressiveBaseline = None
 
 CSS = """
 * { box-sizing: border-box; }
